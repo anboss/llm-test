@@ -712,3 +712,86 @@ Request p95 latency	May increase because each request now does extra memory work
 Demo talk track
 
 “This deployment introduced a bad memory allocation pattern in the consuming API. The server-side API is still responding, but the consumer now allocates and retains memory on each request. In traces, we may only see that the consumer request is slower. But with runtime metrics, we can see that memory, allocation, and GC activity increased right after the deployment. That tells us the issue is likely inside the .NET consuming service, not only in the downstream server API.”
+
+
+## Answer: it is **not .NET 10-only** — it was introduced in **.NET 9**
+
+The feature you described — enabling `Experimental.System.Net.*` sources and getting additional network-related spans — is a **.NET 9+ feature**, not specifically a .NET 10 feature.
+
+Microsoft’s System.Net tracing documentation says:
+
+> **.NET 9 introduced experimental connection tracing**, adding new activities across `System.Net` libraries to diagnose connection issues. It includes an `HTTP connection setup` span with child spans for **DNS lookup**, **TCP socket connect**, and **TLS handshake**. ([Microsoft Learn][1])
+
+The OpenTelemetry semantic convention page also confirms that the key network spans were **added in .NET 9**, including:
+
+| Span / Activity          | ActivitySource                                     | Added                              |
+| ------------------------ | -------------------------------------------------- | ---------------------------------- |
+| HTTP client request      | `System.Net.Http`                                  | HTTP semantic span added in .NET 9 |
+| HTTP wait for connection | `Experimental.System.Net.Http` / connection source | .NET 9                             |
+| HTTP connection setup    | `Experimental.System.Net.Http.Connections`         | .NET 9                             |
+| DNS lookup               | `Experimental.System.Net.NameResolution`           | .NET 9                             |
+| Socket connect           | `Experimental.System.Net.Sockets`                  | .NET 9                             |
+| TLS handshake            | `Experimental.System.Net.Security`                 | .NET 9                             |
+
+The OTel semantic convention page specifically says the HTTP request span with HTTP semantics was added in .NET 9, and the experimental connection, DNS, socket, and TLS spans were also added in .NET 9. ([OpenTelemetry][2])
+
+---
+
+# What changed by .NET version
+
+## .NET 8 and earlier
+
+.NET had limited built-in `HttpClient` tracing. Microsoft says that on **.NET 8 and earlier**, the built-in instrumentation was limited to creating an empty HTTP client request activity, so teams generally needed `OpenTelemetry.Instrumentation.Http` to populate useful tags and emit useful traces. ([Microsoft Learn][1])
+
+## .NET 9+
+
+.NET 9 improved native `System.Net.Http` tracing and added experimental connection tracing.
+
+That means with .NET 9+, you can enable the built-in activity sources directly:
+
+```csharp
+.WithTracing(tracing =>
+{
+    tracing
+        .AddAspNetCoreInstrumentation()
+        .AddSource("System.Net.Http")
+        .AddSource("Experimental.System.Net.*");
+});
+```
+
+Microsoft’s walkthrough shows this exact pattern, using `.AddSource("System.Net.Http")` and `.AddSource("Experimental.System.Net.*")`. ([Microsoft Learn][1])
+
+---
+
+# Your statement about span links is correct
+
+Your wording is accurate:
+
+> The span corresponding to `System.Net.Http` calls can have a link to a separate network trace.
+
+More precisely:
+
+> The `HTTP connection_setup` span is modeled as a **separate root span with its own trace ID**, because HTTP connections can live independently from individual requests. When a request uses that connection, the `HTTP client request` span can contain a **link** to the `HTTP connection_setup` span. ([Microsoft Learn][1])
+
+This is important because it is **not always a parent-child relationship**.
+
+---
+
+# Presentation-safe wording
+
+Use this:
+
+> **This network tracing opt-in is available starting with .NET 9; it is not specific to .NET 10. .NET 9 introduced experimental System.Net connection tracing through `Experimental.System.Net.*` ActivitySources. When enabled, it emits spans for connection wait, connection setup, DNS lookup, socket connect, and TLS handshake. The HTTP client request span remains the main outbound HTTP span, but it may contain a span link to a separate connection setup trace, because HTTP connections are pooled and can outlive individual requests.**
+
+---
+
+# Important caveat
+
+I would include this caveat in your presentation:
+
+> **These network connection spans are experimental and can be noisy. They are best used as an opt-in diagnostic feature, especially when troubleshooting connection pool wait time, DNS delay, socket connection issues, TLS handshake delay, or outbound network latency.**
+
+Microsoft explicitly cautions that these spans are verbose and not normally needed 24x7 in high-workload production scenarios. ([Microsoft Learn][1])
+
+[1]: https://learn.microsoft.com/en-us/dotnet/fundamentals/networking/telemetry/tracing "Networking tracing - .NET | Microsoft Learn"
+[2]: https://opentelemetry.io/docs/specs/semconv/dotnet/dotnet-network-traces/ "Semantic Conventions for network spans emitted by .NET | OpenTelemetry"
